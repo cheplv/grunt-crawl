@@ -14,11 +14,10 @@ module.exports = function(grunt) {
     convert = require('data2xml')();
 
     grunt.registerMultiTask('crawl', 'Crawl a site with PhantomJS to generate sitemap.xml and static content.', function() {
-        var done, crawler, wait, finishCrawl;
 
         // Merge task-specific and/or target-specific options with these defaults.
         var options = this.options({
-            baseUrl: 'http://localhost:9000',
+            baseUrl: 'http://localhost:9000/',
             content: true,
             contentDir: 'www/static',
             sitemap: false,
@@ -35,37 +34,41 @@ module.exports = function(grunt) {
             waitDelay: 5000
         });
 
-        done = this.async();
+        var done = this.async();
+        
+        // Check for trailing slash in base url
+        if (options.baseUrl.slice(-1) !== '/') {
+            options.baseUrl += '/';
+        }
 
         try {
-            crawler = new Crawler(options.baseUrl, options.depth, options);
+            var crawler = new Crawler(options.baseUrl, options.depth, options);
+            var currentUrl = null;
 
-            // Configure the crawler options, first url, and node-phantom.
-            crawler
-                .addUrl(options.baseUrl, 0)
-                .startPhantom();
-
-            finishCrawl = function() {
-
-                var n, absoluteUrl, filePath, nextUrl;
-                var sitemap = {
-                    _attr: {xmlns: 'http://www.sitemaps.org/schemas/sitemap/0.9'},
-                    url: []
-                };
-
+            // Crawler iterator function
+            function crawlerIterate(startCrawl) {
+                
+                startCrawl = startCrawl || false;
+                
                 if (!crawler.doneCrawling()) {
                     // Crawl the next url.
-                    nextUrl = crawler.getNextUrl();
-                    if (nextUrl.length) {
-                        crawler.crawl(nextUrl);
-                    } else {
-                        console.log('   ...Waiting on current url...');
+                    currentUrl = crawler.getNextUrl();
+                    if (currentUrl.length) {
+                        crawler.crawl(currentUrl, function(err, result) {
+                            setTimeout(function() {
+                                crawlerIterate(false);
+                            }, 0);
+                        });
                     }
                 } else {
+                    var sitemap = {
+                        _attr: {xmlns: 'http://www.sitemaps.org/schemas/sitemap/0.9'},
+                        url: []
+                    };
 
-                    for (n in crawler.urls) {
-                        absoluteUrl = crawler.getAbsoluteUrl(n);
-                        filePath = crawler.getStaticFilename(n);
+                    for (var n in crawler.urls) {
+                        var absoluteUrl = crawler.getAbsoluteUrl(n);
+                        var filePath = crawler.getStaticFilename(n);
 
                         // Write out static content for file.
                         if (options.content) {
@@ -89,13 +92,19 @@ module.exports = function(grunt) {
                     }
 
                     crawler.stopPhantom();
-                    clearInterval(wait);
                     done(true);
                 }
-
             };
-
-            wait = setInterval(finishCrawl, options.waitDelay);
+            
+            // Configure the crawler options, first url, and node-phantom.
+            crawler
+                .addUrl(options.baseUrl, 0)
+                .startPhantom(function(error, ph) {
+                    if (error) {
+                        throw 'Failed to start phantom';
+                    }
+                    crawlerIterate(true);
+                });
         } catch (e) {
             grunt.log.error(e);
             done(false);

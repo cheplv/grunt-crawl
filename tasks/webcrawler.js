@@ -37,11 +37,16 @@ function Crawler(url, depth, options) {
 /**
  * Start node-phantom.
  *
+ * @param {Function} callback - Callback notification function
  * @returns {this}
  */
-Crawler.prototype.startPhantom = function() {
-
-    phantom.create(this.createPhantom);
+Crawler.prototype.startPhantom = function(callback) {
+    var self = this;
+    
+    phantom.create(function(error, ph) {
+        self.createPhantom(error, ph);
+        if (callback) callback(error, ph);
+    });
     return this;
 };
 
@@ -77,7 +82,7 @@ Crawler.prototype.setPhantom = function(ph) {
  */
 Crawler.prototype.addUrl = function(url, depth) {
 
-    if(this.urls[url]) return this;
+    if (this.urls[url]) return this;
 
     this.urls[url] = {
         crawled: false,
@@ -103,8 +108,8 @@ Crawler.prototype.getAbsoluteUrl = function(url) {
     if (uri.is('absolute')) {
         return uri.toString();
     }
-
-    return this.baseUrl + url;
+    
+    return '' + this.baseUrl + ((url.slice(0, 1) === '/') ? url.slice(1) : url);
 };
 
 /**
@@ -271,26 +276,27 @@ Crawler.prototype.createSnapshot = function (page, path) {
  * Crawl a url.
  *
  * @param {String} url - The absolute or relative url to crawl.
+ * @param {Function} callback - Callback notification function
  */
-Crawler.prototype.crawl = function(url) {
+Crawler.prototype.crawl = function(url, callback) {
 
     var self = this;
     var currDepth = this.urls[url].depth;
-
+    
     if (this.urls[url] !== undefined &&
         currDepth <= this.depth &&
         !this.urls[url].crawled) {
 
-        console.log('Crawling ' + url + ' ...');
         this.urls[url].crawling = true;
+        var absoluteUrl = self.getAbsoluteUrl(url);
 
+        console.log('Crawling ' + url + ' ...');
+        
         this.phantom.createPage(function(error, page) {
-
-            var absoluteUrl = self.getAbsoluteUrl(url);
 
             if (error) {
                 console.log('   ...failed to create node-phantom page.');
-                return false;
+                return callback(error, null);
             }
 
             page.viewportSize = {
@@ -304,64 +310,88 @@ Crawler.prototype.crawl = function(url) {
 
             page.open(absoluteUrl, function(status) {
 
-                var wait, waitForPage;
+                var wait;
+
+                function closePage(error) {
+                    error = error || null;
+                    
+                    page.close(function() {
+                        console.log('   ...finished crawling.');
+                        self.urls[url].crawling = false;
+                        self.urls[url].crawled = true;
+                        return callback(error, (error) ? false : true);
+                    });
+                }
 
                 if ('fail' === status) {
                     console.log('   ...failed to open page with phantom.');
-                    return;
+                    return closePage(status);
                 }
-
+                
+                var waitForPageTimeout = 0;
+                var waitForPageInterval = 50;
+                
                 // Evaluate the page for dynamically loaded content and links.
-                waitForPage = function() {
+                function waitForPage() {
                     page.evaluate(function(s) {
                         var body;
                         var html;
-
+                        
                         if (s === false) {
                             html = document.documentElement && document.documentElement.outerHTML ? document.documentElement.outerHTML : "";
                         } else {
                             body = document.querySelector(s);
-
+                            
                             if ('ready' === body.getAttribute('data-status')) {
                                 html = document.documentElement && document.documentElement.outerHTML ? document.documentElement.outerHTML : "";
                             }
                         }
+                        
                         return html;
                     }, function(error, documentHtml) {
 
                         var delay, waitForLinks;
-
+                        
+                        clearTimeout(wait);
+                        
                         // Document has not loaded completely yet.
+                        if (documentHtml === null && !error) {
+                            if (waitForPageTimeout < self.options.waitDelay) {
+                                waitForPageTimeout += waitForPageInterval;
+                                wait = setTimeout(waitForPage, waitForPageInterval);
+                                return;
+                            }
+                        }
+
                         if (documentHtml === null || error) {
+                            closePage(error);
                             return;
                         }
 
                         // Add content to url list.
-                        self.urls[url].content = documentHtml;
+                        // self.urls[url].content = documentHtml;
 
                         // Create a snapshot.
                         self.createSnapshot(page, url);
 
-                        clearInterval(wait);
-
                         // Get links from the page as well.
-                        waitForLinks = function() {
+                        function waitForLinks () {
                             page.evaluate(function() {
-
                                 var nav = document.querySelector('a');
-
                                 if (nav !== undefined) {
                                     return [].map.call(document.querySelectorAll('a'), function(link) {
                                         return link.getAttribute('href');
                                     });
                                 }
+                                
+                                return null;
                             }, function(error, links) {
 
                                 clearTimeout(delay);
 
                                 // No links found or error.
                                 if (links === null || error) {
-                                    return;
+                                    return closePage(error);
                                 }
 
                                 // Filter the urls and add each to the crawl list.
@@ -370,25 +400,24 @@ Crawler.prototype.crawl = function(url) {
                                         this.addUrl(curr, currDepth);
                                     }
                                 }, self);
-
-                                page.close(function() {
-                                    console.log('   ...finished crawling.');
-                                });
+                                
+                                closePage();
                             });
                         };
 
-                        delay = setTimeout(waitForLinks, 1000);
+                        delay = setTimeout(waitForLinks, 50);
                     }, self.options.readySelector);
                 };
 
-                wait = setInterval(waitForPage, 3000);
+                wait = setTimeout(waitForPage, waitForPageInterval);
 
             });
         });
+    } else {
+        this.urls[url].crawling = false;
+        this.urls[url].crawled = true;
+        return callback(null, true);
     }
-
-    this.urls[url].crawling = false;
-    this.urls[url].crawled = true;
 };
 
 module.exports = Crawler;
